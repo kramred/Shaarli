@@ -56,31 +56,33 @@ require_once 'inc/rain.tpl.class.php';
 require_once __DIR__ . '/vendor/autoload.php';
 
 // Shaarli library
-require_once 'application/ApplicationUtils.php';
-require_once 'application/Cache.php';
-require_once 'application/CachedPage.php';
+require_once 'application/bookmark/LinkUtils.php';
 require_once 'application/config/ConfigPlugin.php';
-require_once 'application/FeedBuilder.php';
+require_once 'application/feed/Cache.php';
+require_once 'application/http/HttpUtils.php';
+require_once 'application/http/UrlUtils.php';
+require_once 'application/updater/UpdaterUtils.php';
 require_once 'application/FileUtils.php';
-require_once 'application/History.php';
-require_once 'application/HttpUtils.php';
-require_once 'application/LinkDB.php';
-require_once 'application/LinkFilter.php';
-require_once 'application/LinkUtils.php';
-require_once 'application/NetscapeBookmarkUtils.php';
-require_once 'application/PageBuilder.php';
 require_once 'application/TimeZone.php';
-require_once 'application/Url.php';
 require_once 'application/Utils.php';
-require_once 'application/PluginManager.php';
-require_once 'application/Router.php';
-require_once 'application/Updater.php';
+
+use \Shaarli\ApplicationUtils;
+use \Shaarli\Bookmark\Exception\LinkNotFoundException;
+use \Shaarli\Bookmark\LinkDB;
 use \Shaarli\Config\ConfigManager;
+use \Shaarli\Feed\CachedPage;
+use \Shaarli\Feed\FeedBuilder;
+use \Shaarli\History;
 use \Shaarli\Languages;
+use \Shaarli\Netscape\NetscapeBookmarkUtils;
+use \Shaarli\Plugin\PluginManager;
+use \Shaarli\Render\PageBuilder;
+use \Shaarli\Render\ThemeUtils;
+use \Shaarli\Router;
 use \Shaarli\Security\LoginManager;
 use \Shaarli\Security\SessionManager;
-use \Shaarli\ThemeUtils;
 use \Shaarli\Thumbnailer;
+use \Shaarli\Updater\Updater;
 
 // Ensure the PHP version is supported
 try {
@@ -310,9 +312,7 @@ function showDailyRSS($conf, $loginManager)
     $LINKSDB = new LinkDB(
         $conf->get('resource.datastore'),
         $loginManager->isLoggedIn(),
-        $conf->get('privacy.hide_public_links'),
-        $conf->get('redirector.url'),
-        $conf->get('redirector.encode_url')
+        $conf->get('privacy.hide_public_links')
     );
 
     /* Some Shaarlies may have very few links, so we need to look
@@ -354,13 +354,9 @@ function showDailyRSS($conf, $loginManager)
 
         // We pre-format some fields for proper output.
         foreach ($links as &$link) {
-            $link['formatedDescription'] = format_description(
-                $link['description'],
-                $conf->get('redirector.url'),
-                $conf->get('redirector.encode_url')
-            );
+            $link['formatedDescription'] = format_description($link['description']);
             $link['timestamp'] = $link['created']->getTimestamp();
-            if (startsWith($link['url'], '?')) {
+            if (is_note($link['url'])) {
                 $link['url'] = index_url($_SERVER) . $link['url'];  // make permalink URL absolute
             }
         }
@@ -431,11 +427,7 @@ function showDaily($pageBuilder, $LINKSDB, $conf, $pluginManager, $loginManager)
         $taglist = explode(' ', $link['tags']);
         uasort($taglist, 'strcasecmp');
         $linksToDisplay[$key]['taglist']=$taglist;
-        $linksToDisplay[$key]['formatedDescription'] = format_description(
-            $link['description'],
-            $conf->get('redirector.url'),
-            $conf->get('redirector.encode_url')
-        );
+        $linksToDisplay[$key]['formatedDescription'] = format_description($link['description']);
         $linksToDisplay[$key]['timestamp'] =  $link['created']->getTimestamp();
     }
 
@@ -1072,7 +1064,6 @@ function renderPage($conf, $pluginManager, $LINKSDB, $history, $sessionManager, 
             $PAGE->assign('api_enabled', $conf->get('api.enabled', true));
             $PAGE->assign('api_secret', $conf->get('api.secret'));
             $PAGE->assign('languages', Languages::getAvailableLanguages());
-            $PAGE->assign('language', $conf->get('translation.language'));
             $PAGE->assign('gd_enabled', extension_loaded('gd'));
             $PAGE->assign('thumbnails_mode', $conf->get('thumbnails.mode', Thumbnailer::MODE_NONE));
             $PAGE->assign('pagetitle', t('Configure') .' - '. $conf->get('general.title', 'Shaarli'));
@@ -1184,10 +1175,14 @@ function renderPage($conf, $pluginManager, $LINKSDB, $history, $sessionManager, 
             $link['title'] = $link['url'];
         }
 
-        if ($conf->get('thumbnails.mode', Thumbnailer::MODE_NONE) !== Thumbnailer::MODE_NONE) {
+        if ($conf->get('thumbnails.mode', Thumbnailer::MODE_NONE) !== Thumbnailer::MODE_NONE
+            && ! is_note($link['url'])
+        ) {
             $thumbnailer = new Thumbnailer($conf);
             $link['thumbnail'] = $thumbnailer->get($url);
         }
+
+        $link['sticky'] = isset($link['sticky']) ? $link['sticky'] : false;
 
         $pluginManager->executeHooks('save_link', $link);
 
@@ -1277,6 +1272,51 @@ function renderPage($conf, $pluginManager, $LINKSDB, $history, $sessionManager, 
             );
         }
 
+        header('Location: ' . $location); // After deleting the link, redirect to appropriate location
+        exit;
+    }
+
+    // -------- User clicked either "Set public" or "Set private" bulk operation
+    if ($targetPage == Router::$PAGE_CHANGE_VISIBILITY) {
+        if (! $sessionManager->checkToken($_GET['token'])) {
+            die(t('Wrong token.'));
+        }
+
+        $ids = trim($_GET['ids']);
+        if (strpos($ids, ' ') !== false) {
+            // multiple, space-separated ids provided
+            $ids = array_values(array_filter(preg_split('/\s+/', escape($ids))));
+        } else {
+            // only a single id provided
+            $ids = [$ids];
+        }
+
+        // assert at least one id is given
+        if (!count($ids)) {
+            die('no id provided');
+        }
+        // assert that the visibility is valid
+        if (!isset($_GET['newVisibility']) || !in_array($_GET['newVisibility'], ['public', 'private'])) {
+            die('invalid visibility');
+        } else {
+            $private = $_GET['newVisibility'] === 'private';
+        }
+        foreach ($ids as $id) {
+            $id = (int) escape($id);
+            $link = $LINKSDB[$id];
+            $link['private'] = $private;
+            $pluginManager->executeHooks('save_link', $link);
+            $LINKSDB[$id] = $link;
+        }
+        $LINKSDB->save($conf->get('resource.page_cache')); // save to disk
+
+        $location = '?';
+        if (isset($_SERVER['HTTP_REFERER'])) {
+            $location = generateLocation(
+                $_SERVER['HTTP_REFERER'],
+                $_SERVER['HTTP_HOST']
+            );
+        }
         header('Location: ' . $location); // After deleting the link, redirect to appropriate location
         exit;
     }
@@ -1566,7 +1606,7 @@ function renderPage($conf, $pluginManager, $LINKSDB, $history, $sessionManager, 
         $ids = [];
         foreach ($LINKSDB as $link) {
             // A note or not HTTP(S)
-            if ($link['url'][0] === '?' || ! startsWith(strtolower($link['url']), 'http')) {
+            if (is_note($link['url']) || ! startsWith(strtolower($link['url']), 'http')) {
                 continue;
             }
             $ids[] = $link['id'];
@@ -1670,11 +1710,7 @@ function buildLinkList($PAGE, $LINKSDB, $conf, $pluginManager, $loginManager)
     $linkDisp = array();
     while ($i<$end && $i<count($keys)) {
         $link = $linksToDisplay[$keys[$i]];
-        $link['description'] = format_description(
-            $link['description'],
-            $conf->get('redirector.url'),
-            $conf->get('redirector.encode_url')
-        );
+        $link['description'] = format_description($link['description']);
         $classLi =  ($i % 2) != 0 ? '' : 'publicLinkHightLight';
         $link['class'] = $link['private'] == 0 ? $classLi : 'private';
         $link['timestamp'] = $link['created']->getTimestamp();
@@ -1735,7 +1771,6 @@ function buildLinkList($PAGE, $LINKSDB, $conf, $pluginManager, $loginManager)
         'search_term' => $searchterm,
         'search_tags' => $searchtags,
         'visibility' => ! empty($_SESSION['visibility']) ? $_SESSION['visibility'] : '',
-        'redirector' => $conf->get('redirector.url'),  // Optional redirector URL.
         'links' => $linkDisp,
     );
 
@@ -1885,9 +1920,7 @@ try {
 $linkDb = new LinkDB(
     $conf->get('resource.datastore'),
     $loginManager->isLoggedIn(),
-    $conf->get('privacy.hide_public_links'),
-    $conf->get('redirector.url'),
-    $conf->get('redirector.encode_url')
+    $conf->get('privacy.hide_public_links')
 );
 
 $container = new \Slim\Container();
@@ -1910,7 +1943,7 @@ $app->group('/api/v1', function () {
     $this->put('/tags/{tagName:[\w]+}', '\Shaarli\Api\Controllers\Tags:putTag')->setName('putTag');
     $this->delete('/tags/{tagName:[\w]+}', '\Shaarli\Api\Controllers\Tags:deleteTag')->setName('deleteTag');
 
-    $this->get('/history', '\Shaarli\Api\Controllers\History:getHistory')->setName('getHistory');
+    $this->get('/history', '\Shaarli\Api\Controllers\HistoryController:getHistory')->setName('getHistory');
 })->add('\Shaarli\Api\ApiMiddleware');
 
 $response = $app->run(true);

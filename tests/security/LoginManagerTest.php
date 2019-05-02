@@ -2,7 +2,8 @@
 namespace Shaarli\Security;
 
 require_once 'tests/utils/FakeConfigManager.php';
-use \PHPUnit\Framework\TestCase;
+
+use PHPUnit\Framework\TestCase;
 
 /**
  * Test coverage for LoginManager
@@ -255,6 +256,20 @@ class LoginManagerTest extends TestCase
 
         $this->assertEquals(
             sha1($this->passwordHash . $this->clientIpAddress . $this->salt),
+            $this->loginManager->getStaySignedInToken()
+        );
+    }
+
+    /**
+     * Generate a token depending on the user credentials with session protected disabled
+     */
+    public function testGenerateStaySignedInTokenSessionProtectionDisabled()
+    {
+        $this->configManager->set('security.session_protection_disabled', true);
+        $this->loginManager->generateStaySignedInToken($this->clientIpAddress);
+
+        $this->assertEquals(
+            sha1($this->passwordHash . $this->salt),
             $this->loginManager->getStaySignedInToken()
         );
     }

@@ -3,9 +3,9 @@
 namespace Shaarli;
 
 use Shaarli\Config\ConfigManager;
+use WebThumbnailer\Application\ConfigManager as WTConfigManager;
 use WebThumbnailer\Exception\WebThumbnailerException;
 use WebThumbnailer\WebThumbnailer;
-use WebThumbnailer\Application\ConfigManager as WTConfigManager;
 
 /**
  * Class Thumbnailer
@@ -55,7 +55,7 @@ class Thumbnailer
         $this->conf = $conf;
 
         if (! $this->checkRequirements()) {
-            $this->conf->set('thumbnails.enabled', false);
+            $this->conf->set('thumbnails.mode', Thumbnailer::MODE_NONE);
             $this->conf->write(true);
             // TODO: create a proper error handling system able to catch exceptions...
             die(t(
