@@ -1,5 +1,37 @@
 ### Decode datastore content
 
+To fix broken datetime objects in `datastore.php`
+
+```php
+<?php
+
+if ($argc < 2 )
+{
+    exit( "Usage: $argv[0] <datastore.php> [fixme]\n" );
+}
+
+$file_content = file_get_contents($argv[1]);
+$data = preg_replace("!.*/\* (.+) \*/.*!", "$1", $file_content);
+$out = unserialize(gzinflate(base64_decode($data)));
+
+for ($i = 0; $i < count($out); $i++) {
+  if ( is_bool( $out[$i]["created"] ) ) {
+    if ($argv[2] != "fixme") {print_r( $out[$i] );}
+    $out[$i]["created"] = $out[$i]["updated"];
+  }
+}
+
+if ($argv[2] == "fixme") {
+  $fixed = base64_encode(gzdeflate(serialize($out)));
+  $pre = "<?php /* ";
+  $ps = " */ ?>";
+  echo $pre . $fixed . $ps;
+}
+
+exit();
+?>
+```
+
 To display the array representing the data saved in `data/datastore.php`, use the following snippet:
 
 ```php
