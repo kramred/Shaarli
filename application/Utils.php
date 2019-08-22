@@ -305,7 +305,9 @@ function format_date($date, $time = true, $intl = true)
     if (! $date instanceof DateTime) {
         return false;
     }
-
+// https://stackoverflow.com/questions/5322285/how-do-i-convert-datetime-to-iso-8601-in-php
+// $datetime = new DateTime('2010-12-30 23:21:46');
+// echo $datetime->format(DateTime::ATOM); // Updated ISO8601
     if (! $intl || ! class_exists('IntlDateFormatter')) {
         $format = $time ? '%c' : '%x';
         return strftime($format, $date->getTimestamp());
